@@ -294,7 +294,7 @@ class Import_Command extends WP_CLI_Command {
 	/**
 	 * Determines whether the requested importer is available.
 	 */
-	private function is_importer_available() {
+	protected function is_importer_available() {
 		require_once ABSPATH . 'wp-admin/includes/plugin.php';
 
 		if ( class_exists( 'WP_Import' ) ) {

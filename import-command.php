@@ -10,3 +10,4 @@ if ( file_exists( $wpcli_import_autoloader ) ) {
 }
 
 WP_CLI::add_command( 'import', 'Import_Command' );
+WP_CLI::add_command( 'convert', 'Convert_Command' );
