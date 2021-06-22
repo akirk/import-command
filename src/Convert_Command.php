@@ -61,6 +61,7 @@ class Convert_Command extends Import_Command {
 		$wp_import                  = new WP_Import();
 		$wp_import->processed_posts = $this->processed_posts;
 		$import_data                = $wp_import->parse( $file );
+
 		if ( is_wp_error( $import_data ) ) {
 			return $import_data;
 		}
@@ -75,48 +76,124 @@ class Convert_Command extends Import_Command {
 			mkdir( $site_dir );
 		}
 
-		file_put_contents( $site_dir . 'config.json', json_encode( array() ) );
-
-		$posts_dir = $base_dir . '/posts/';
-		if ( ! file_exists( $posts_dir) ) {
-			mkdir( $posts_dir );
+		$dom       = new DOMDocument;
+		$old_value = null;
+		if ( function_exists( 'libxml_disable_entity_loader' ) && PHP_VERSION_ID < 80000 ) {
+			$old_value = libxml_disable_entity_loader( true );
+		}
+		$success = $dom->loadXML( file_get_contents( $file ) );
+		if ( ! is_null( $old_value ) ) {
+			libxml_disable_entity_loader( $old_value );
 		}
 
-		foreach( $import_data['posts'] as $post ) {
-			$filename = $posts_dir . $post['post_id'] . '.json';
-			file_put_contents( $filename, json_encode( $post ) );
+		if ( ! $success || isset( $dom->doctype ) ) {
+			return new WP_Error( 'SimpleXML_parse_error', __( 'There was an error when reading this WXR file', 'wordpress-importer' ), libxml_get_errors() );
 		}
 
-		$terms_dir = $base_dir . '/terms/';
-		if ( ! file_exists( $terms_dir) ) {
-			mkdir( $terms_dir );
+		$xml = simplexml_import_dom( $dom );
+		unset( $dom );
+
+		// halt if loading produces an error
+		if ( ! $xml ) {
+			return new WP_Error( 'SimpleXML_parse_error', __( 'There was an error when reading this WXR file', 'wordpress-importer' ), libxml_get_errors() );
+		}
+		$config = array();
+		foreach ( array(
+			'/rss/channel/title' => 'title',
+			'/rss/channel/link' => 'link',
+			'/rss/channel/description' => 'description',
+			'/rss/channel/pubDate' => 'date',
+			'/rss/channel/language' => 'language',
+		) as $xpath => $key ) {
+			$val = $xml->xpath( $xpath );
+			if ( ! $val ) {
+				continue;
+			}
+			$config[ $key ] = (string) trim( $val[0] );
 		}
 
-		foreach( $import_data['terms'] as $term ) {
-			$filename = $terms_dir . $term['term_id'] . '.json';
-			file_put_contents( $filename, json_encode( $term ) );
-		}
+		file_put_contents( $site_dir . 'config.json', json_encode( $config ) );
 
-		$objects_dir = $base_dir . '/objects/';
-		if ( ! file_exists( $objects_dir) ) {
-			mkdir( $objects_dir );
-		}
+		$map = array(
+			'users' => array(
+				'dir' => 'users/',
+				'id' => 'author_id',
+				'map' => array(
+					'author_login' => 'username',
+					'author_display_name' => 'display_name',
+					'author_email' => 'email',
+				),
+			),
+			'posts' => array(
+				'dir' => 'posts/',
+				'id' => 'post_id',
+				'map' => array(
+					'post_title' => 'title',
+					'post_author' => 'author',
+					'post_status' => 'status',
+					'post_content' => 'content',
+					'post_type' => 'type',
+					'post_content' => 'content',
+					'post_date_gmt' => 'date_utc',
+					'attachment_url' => 'attachment_url',
+					'postmeta' => 'postmeta',
+				),
+			),
+			'terms' => array(
+				'dir' => 'terms/',
+				'id' => 'term_id',
+				'map' => array(
+					'term_name' => 'name',
+					'term_taxonomy' => 'taxonomy',
+					'slug' => 'slug',
+					'term_parent' => 'parent',
+					'term_description' => 'description',
+				),
+			),
+			'categories' => array(
+				'dir' => 'categories/',
+				'id' => 'term_id',
+				'map' => array(
+					'category_nicename' => 'name',
+					'category_parent' => 'parent',
+					'cat_name' => 'slug',
+					'category_description' => 'description',
+				),
+			),
+			'objects' => array(
+				'dir' => 'objects/',
+				'id' => 'object_id',
+				'map' => array(
+					'type' => 'type',
+					'data' => 'data',
+				),
+			),
+		);
 
-		foreach( $import_data['objects'] as $object ) {
-			$filename = $objects_dir . $object['object_id'] . '.json';
-			file_put_contents( $filename, json_encode( $object ) );
-		}
+		foreach ( $map as $key => $data ) {
+			if ( empty( $import_data[ $key ] ) ) {
+				continue;
+			}
 
-		$users_dir = $base_dir . '/users/';
-		if ( ! file_exists( $users_dir) ) {
-			mkdir( $users_dir );
-		}
+			$dir = $base_dir . '/' . $data['dir'];
+			if ( ! file_exists( $dir ) ) {
+				mkdir( $dir );
+			}
 
-		foreach( $import_data['authors'] as $user ) {
-			$filename = $users_dir . $user['author_id'] . '.json';
-			$user['user_id'] = $user['author_id'];
-			unset( $user['author_id'] );
-			file_put_contents( $filename, json_encode( $user ) );
+			$json = array();
+			foreach ( $import_data[ $key ] as $entry ) {
+				if ( ! isset( $entry[ $data['id'] ] ) || ! is_numeric( $entry[ $data['id'] ] ) ) {
+					continue;
+				}
+
+				foreach( $data['map'] as $wxr_key => $json_key ) {
+					if ( isset( $entry[ $wxr_key ] ) ) {
+						$json[ $json_key ] = $entry[ $wxr_key ];
+					}
+				}
+
+				file_put_contents( $dir . $entry[ $data['id'] ] . '.json', json_encode( $json ) );
+			}
 		}
 	}
 }
