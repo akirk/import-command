@@ -2,11 +2,12 @@
 
 class Convert_Command extends Import_Command {
 
-	public $processed_posts = array();
+	public $filelist = array();
 
 	public function __invoke( $args, $assoc_args ) {
 		$defaults   = array(
-			'output' => '-'
+			'overwrite' => false,
+			'output' => false,
 		);
 		$assoc_args = wp_parse_args( $assoc_args, $defaults );
 
@@ -49,33 +50,16 @@ class Convert_Command extends Import_Command {
 				WP_CLI::error( $ret );
 			} else {
 				WP_CLI::log( '' ); // WXR import ends with HTML, so make sure message is on next line
-				WP_CLI::success( "Finished converting from '$file' file." );
+				WP_CLI::success( "Converted '$file' to '$ret'." );
 			}
 		}
 	}
 
-	/**
-	 * Imports a WXR file.
-	 */
-	private function convert_wxr( $file, $args ) {
-		$wp_import                  = new WP_Import();
-		$wp_import->processed_posts = $this->processed_posts;
-		$import_data                = $wp_import->parse( $file );
+	private function json_encode( $json ) {
+		return json_encode( $json, JSON_PRETTY_PRINT );
+	}
 
-		if ( is_wp_error( $import_data ) ) {
-			return $import_data;
-		}
-
-		$base_dir = getcwd() . '/export/';
-		if ( ! file_exists( $base_dir) ) {
-			mkdir( $base_dir );
-		}
-
-		$site_dir = $base_dir . '/site/';
-		if ( ! file_exists( $site_dir) ) {
-			mkdir( $site_dir );
-		}
-
+	private function get_blog_details( $file ) {
 		$dom       = new DOMDocument;
 		$old_value = null;
 		if ( function_exists( 'libxml_disable_entity_loader' ) && PHP_VERSION_ID < 80000 ) {
@@ -112,7 +96,25 @@ class Convert_Command extends Import_Command {
 			$config[ $key ] = (string) trim( $val[0] );
 		}
 
-		file_put_contents( $site_dir . 'config.json', json_encode( $config ) );
+		return $config;
+	}
+
+	/**
+	 * Imports a WXR file.
+	 */
+	private function convert_wxr( $file, $args ) {
+		$wp_import                  = new WP_Import();
+		$wp_import->processed_posts = $this->processed_posts;
+		$import_data                = $wp_import->parse( $file );
+
+		if ( is_wp_error( $import_data ) ) {
+			return $import_data;
+		}
+
+		$write_to_dir = false;
+		// $write_to_dir = getcwd() . '/export/'; // uncomment to write files.
+
+		$this->add_file( 'site/config.json', $this->json_encode( $this->get_blog_details( $file ) ), $write_to_dir );
 
 		$map = array(
 			'users' => array(
@@ -175,25 +177,65 @@ class Convert_Command extends Import_Command {
 				continue;
 			}
 
-			$dir = $base_dir . '/' . $data['dir'];
-			if ( ! file_exists( $dir ) ) {
-				mkdir( $dir );
-			}
-
-			$json = array();
 			foreach ( $import_data[ $key ] as $entry ) {
 				if ( ! isset( $entry[ $data['id'] ] ) || ! is_numeric( $entry[ $data['id'] ] ) ) {
 					continue;
 				}
 
+				$json = array();
 				foreach( $data['map'] as $wxr_key => $json_key ) {
 					if ( isset( $entry[ $wxr_key ] ) ) {
 						$json[ $json_key ] = $entry[ $wxr_key ];
 					}
 				}
 
-				file_put_contents( $dir . $entry[ $data['id'] ] . '.json', json_encode( $json ) );
+				$this->add_file( $data['dir'] . $entry[ $data['id'] ] . '.json', $this->json_encode( $json ) );
 			}
 		}
+
+		$output_filename = $args['output'];
+		if ( ! $output_filename ) {
+			$output_filename = preg_replace( '/\.(wxr|xml)$/i', '.wxz', $file );
+			if ( $output_filename === $file ) {
+				$output_filename = $file . '.wxz';
+			}
+		}
+
+		if ( file_exists( $output_filename ) && ! $args['overwrite'] ) {
+			return new WP_Error( 'file-exists', "File $output_filename already exists." );
+		}
+
+		return $this->write_wxz( $output_filename );
+	}
+
+	private function add_file( $filename, $content, $write_to_dir = false ) {
+		require_once ABSPATH . '/wp-admin/includes/class-pclzip.php';
+
+		$this->filelist[] = array(
+			PCLZIP_ATT_FILE_NAME => $filename,
+			PCLZIP_ATT_FILE_CONTENT => $content,
+		);
+
+		if ( $write_to_dir ) {
+			$dir = dirname( $filename );
+			$write_to_dir = rtrim( $write_to_dir, '/' ) . '/';
+			if ( ! file_exists( $write_to_dir . $dir ) ) {
+				mkdir( $write_to_dir . $dir, 0777, true );
+			}
+			file_put_contents( $write_to_dir . $filename, $content );
+		}
+
+		return $filename;
+	}
+
+	private function write_wxz( $output_filename ) {
+		if ( empty( $this->filelist ) ) {
+			return new WP_Error( 'no-files', 'No files to write.' );
+		}
+
+		$archive = new PclZip( $output_filename );
+		$list = $archive->create( $this->filelist );
+
+		return $output_filename;
 	}
 }
